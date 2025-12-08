@@ -1,0 +1,12 @@
+/NOLOGO
+/errorReport:prompt
+/MACHINE:x64
+/SUBSYSTEM:WINDOWS
+/DEF
+/NAME:"UE4Editor-VolumeClipboard.dll"
+/IGNORE:4221
+/NODEFAULTLIB
+"F:\SBRUIN-Blank-4.27\Intermediate\Build\Win64\fnaf9Editor\Development\UnrealEd\SharedPCH.UnrealEd.ShadowErrors.h.obj"
+"F:\SBRUIN-Blank-4.27\Plugins\VolumeClipboard\Intermediate\Build\Win64\UE4Editor\Development\VolumeClipboard\VolumeClipboard.cpp.obj"
+"F:\SBRUIN-Blank-4.27\Plugins\VolumeClipboard\Intermediate\Build\Win64\UE4Editor\Development\VolumeClipboard\Default.rc2.res"
+/OUT:"F:\SBRUIN-Blank-4.27\Plugins\VolumeClipboard\Intermediate\Build\Win64\UE4Editor\Development\VolumeClipboard\UE4Editor-VolumeClipboard.lib"

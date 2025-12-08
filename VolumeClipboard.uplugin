@@ -1,0 +1,24 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0",
+	"FriendlyName": "Volume Clipboard",
+	"Description": "Extracts volume data to clipboard and recreates them with valid brush shapes.",
+	"Category": "Editor Tools",
+	"CreatedBy": "AI",
+	"CreatedByURL": "",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"CanContainContent": false,
+	"IsBetaVersion": false,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "VolumeClipboard",
+			"Type": "Editor",
+			"LoadingPhase": "Default"
+		}
+	]
+}
