@@ -3,7 +3,7 @@
 # HOW TO INSTALL:
 
 Download the latest release and then uncompress it.
-Copy the uncompressed folder and paste it into your project's "Plugin" folder.
+Copy the folder inside the zip and paste it into your project's "Plugins" folder.
 Delete your "Binaries", ".vs", and "Intermediate" folders. Delete your project's sln.
 Regenerate Project Files by right-clicking your uproject file and selecting "Generate Visual Studio Project Files"
 Open the .sln and rebuild your project. DONE
