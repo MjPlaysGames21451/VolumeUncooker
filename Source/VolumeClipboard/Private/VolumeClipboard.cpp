@@ -38,7 +38,7 @@
 #include "Engine/Level.h" 
 #include "EngineUtils.h"                  
 #include "Engine/LevelStreaming.h"
-#include "Engine/LevelStreamingDynamic.h" 
+#include "Engine/LevelStreamingKismet.h" 
 #include "Engine/LevelStreamingVolume.h"  
 #include "EditorLevelUtils.h"             
 #include "Misc/MessageDialog.h"           
@@ -275,7 +275,6 @@ FReply FVolumeClipboardModule::OnExtractVolumesClicked()
 			VolObj->SetStringField("Class", Volume->GetClass()->GetPathName());
 			VolObj->SetStringField("InternalName", Volume->GetName());
 
-			// --- LEVEL ORIGIN ---
 			if (Volume->GetLevel())
 			{
 				UPackage* LevelPackage = Volume->GetLevel()->GetOutermost();
@@ -286,7 +285,6 @@ FReply FVolumeClipboardModule::OnExtractVolumesClicked()
 				VolObj->SetStringField("OriginLevelPackage", LevelPackageName);
 			}
 
-			// --- STREAMING LEVEL SLOTS ---
 			if (World && Cast<ALevelStreamingVolume>(Volume))
 			{
 				TArray<TSharedPtr<FJsonValue>> StreamLinks;
@@ -295,7 +293,6 @@ FReply FVolumeClipboardModule::OnExtractVolumesClicked()
 					if (StreamingLevel)
 					{
 						int32 SlotIndex = StreamingLevel->EditorStreamingVolumes.Find(Cast<ALevelStreamingVolume>(Volume));
-
 						if (SlotIndex != INDEX_NONE)
 						{
 							TSharedPtr<FJsonObject> LinkObj = MakeShareable(new FJsonObject);
@@ -308,14 +305,12 @@ FReply FVolumeClipboardModule::OnExtractVolumesClicked()
 				VolObj->SetArrayField("StreamLinks", StreamLinks);
 			}
 
-			// --- TRANSFORM ---
 			FVector CenterLocation = Volume->GetActorLocation();
 			VolObj->SetStringField("LocX", DoubleToPrecisionString(CenterLocation.X));
 			VolObj->SetStringField("LocY", DoubleToPrecisionString(CenterLocation.Y));
 			VolObj->SetStringField("LocZ", DoubleToPrecisionString(CenterLocation.Z));
 
 			FQuat Quat = Volume->GetActorQuat();
-			// FIXED: Use VolObj here, not Obj
 			VolObj->SetStringField("QuatX", DoubleToPrecisionString(Quat.X));
 			VolObj->SetStringField("QuatY", DoubleToPrecisionString(Quat.Y));
 			VolObj->SetStringField("QuatZ", DoubleToPrecisionString(Quat.Z));
@@ -326,22 +321,17 @@ FReply FVolumeClipboardModule::OnExtractVolumesClicked()
 			VolObj->SetStringField("SclY", DoubleToPrecisionString(Scale.Y));
 			VolObj->SetStringField("SclZ", DoubleToPrecisionString(Scale.Z));
 
-			// --- EXTRA SETTINGS ---
 			VolObj->SetNumberField("SpawnMethod", (int32)Volume->SpawnCollisionHandlingMethod);
-
 			if (Volume->GetRootComponent())
 			{
 				VolObj->SetNumberField("Mobility", (int32)Volume->GetRootComponent()->Mobility);
 			}
-
 			VolObj->SetNumberField("BrushType", (int32)Volume->BrushType);
 
-			// --- 1. SERIALIZE ACTOR PROPERTIES ---
 			TSharedPtr<FJsonObject> ActorProps = MakeShareable(new FJsonObject);
 			SerializeObjectProperties(Volume, ActorProps);
 			VolObj->SetObjectField("Properties", ActorProps);
 
-			// --- 2. SERIALIZE COMPONENT PROPERTIES ---
 			TArray<TSharedPtr<FJsonValue>> ComponentList;
 			for (UActorComponent* Comp : Volume->GetComponents())
 			{
@@ -358,7 +348,6 @@ FReply FVolumeClipboardModule::OnExtractVolumesClicked()
 			}
 			VolObj->SetArrayField("Components", ComponentList);
 
-			// --- FORCE EXACT GEOMETRY EXTRACTION ---
 			UModel* Model = Volume->Brush;
 			if (!Model && Volume->GetBrushComponent()) Model = Volume->GetBrushComponent()->Brush;
 
@@ -366,7 +355,6 @@ FReply FVolumeClipboardModule::OnExtractVolumesClicked()
 			{
 				TArray<TSharedPtr<FJsonValue>> PolyArray;
 
-				// METHOD 1: High-Level Polys
 				if (Model->Polys && Model->Polys->Element.Num() > 0)
 				{
 					for (const FPoly& Poly : Model->Polys->Element)
@@ -388,7 +376,6 @@ FReply FVolumeClipboardModule::OnExtractVolumesClicked()
 						PolyArray.Add(MakeShareable(new FJsonValueObject(PolyObj)));
 					}
 				}
-				// METHOD 2: Fallback to BSP Nodes
 				else if (Model->Nodes.Num() > 0)
 				{
 					for (int32 i = 0; i < Model->Nodes.Num(); i++)
@@ -416,12 +403,10 @@ FReply FVolumeClipboardModule::OnExtractVolumesClicked()
 						PolyArray.Add(MakeShareable(new FJsonValueObject(PolyObj)));
 					}
 				}
-
 				VolObj->SetArrayField("RawPolys", PolyArray);
 			}
 
 			VolObj->SetStringField("BuilderType", "CustomPolys");
-
 			VolumeArray.Add(MakeShareable(new FJsonValueObject(VolObj)));
 		}
 	}
@@ -446,25 +431,125 @@ FReply FVolumeClipboardModule::OnCreateVolumesClicked()
 
 	if (FJsonSerializer::Deserialize(Reader, JsonArray))
 	{
-		// FIX: Pass 1 Start - Begin the paste transaction
-		GEditor->BeginTransaction(LOCTEXT("PasteVolumes", "Paste Volumes"));
-
 		UWorld* World = GEditor->GetEditorWorldContext().World();
-		if (!World)
+		if (!World) return FReply::Handled();
+
+		// Save current level so we can restore it ONCE at the end
+		ULevel* SavedCurrentLevel = World->GetCurrentLevel();
+
+		// =========================================================================================
+		// PHASE 1: SCAN FOR REQUIRED LEVELS & LOAD THEM IMMEDIATELY
+		// =========================================================================================
+		TSet<FString> RequiredLevelPaths;
+		EAppReturnType::Type MissingLevelResponse = EAppReturnType::Retry;
+
+		// 1. Collect all potential level paths from the clipboard JSON
+		for (TSharedPtr<FJsonValue> Val : JsonArray)
 		{
-			GEditor->EndTransaction();
-			return FReply::Handled();
+			TSharedPtr<FJsonObject> Obj = Val->AsObject();
+			if (!Obj.IsValid()) continue;
+
+			const TSharedPtr<FJsonObject>* PropsPtr;
+			if (Obj->TryGetObjectField("Properties", PropsPtr))
+			{
+				if ((*PropsPtr)->HasField("StreamingLevelNames"))
+				{
+					FString RawNames = (*PropsPtr)->GetStringField("StreamingLevelNames");
+					RawNames = RawNames.Replace(TEXT("("), TEXT("")).Replace(TEXT(")"), TEXT("")).Replace(TEXT("\""), TEXT("")).Replace(TEXT("\'"), TEXT(""));
+
+					TArray<FString> Targets;
+					RawNames.ParseIntoArray(Targets, TEXT(","), true);
+					for (FString& Path : Targets)
+					{
+						FString CleanPath = Path.TrimStartAndEnd();
+						if (!CleanPath.IsEmpty())
+						{
+							RequiredLevelPaths.Add(CleanPath);
+						}
+					}
+				}
+			}
 		}
+
+		// 2. Iterate and Load Levels
+		FString CurrentWorldPkg = World->GetOutermost()->GetName();
+		FString CurrentWorldShort = FPackageName::GetShortName(CurrentWorldPkg);
+
+		for (const FString& PathToCheck : RequiredLevelPaths)
+		{
+			// Check if Package Exists (Prevent crash on invalid path)
+			if (!FPackageName::DoesPackageExist(PathToCheck)) continue;
+
+			// Safety: Don't load self (Recursion Crash Fix)
+			FString CheckShort = FPackageName::GetShortName(PathToCheck);
+			if (PathToCheck == CurrentWorldPkg || CheckShort == CurrentWorldShort) continue;
+
+			// Check if already loaded
+			bool bIsLoaded = false;
+			for (ULevelStreaming* StreamingLevel : World->GetStreamingLevels())
+			{
+				if (StreamingLevel && (StreamingLevel->GetWorldAssetPackageName() == PathToCheck || FPackageName::GetShortName(StreamingLevel->GetWorldAssetPackageName()) == CheckShort))
+				{
+					bIsLoaded = true;
+					break;
+				}
+			}
+
+			if (bIsLoaded) continue;
+
+			// Check User Preference
+			if (MissingLevelResponse == EAppReturnType::NoAll) continue;
+
+			bool bShouldLoad = false;
+			if (MissingLevelResponse == EAppReturnType::YesAll)
+			{
+				bShouldLoad = true;
+			}
+			else
+			{
+				FText Message = FText::Format(LOCTEXT("MissingLevelPrompt", "The Level '{0}' referenced by this volume is not in the current world.\n\nDo you want to add it as a Sub-Level now?"), FText::FromString(CheckShort));
+				MissingLevelResponse = FMessageDialog::Open(EAppMsgType::YesNoYesAllNoAll, Message);
+
+				if (MissingLevelResponse == EAppReturnType::Yes || MissingLevelResponse == EAppReturnType::YesAll)
+				{
+					bShouldLoad = true;
+				}
+			}
+
+			if (bShouldLoad)
+			{
+				// CRITICAL FIX: Ensure no actors are selected in the new map, which prevents state corruption during context switches
+				GEditor->SelectNone(true, true);
+				GEditor->NoteSelectionChange();
+
+				// LOAD LEVEL
+				// FIX: Use 'auto' to handle the return type safely.
+				// In UE4.27 this returns ULevel*, but if your build expects ULevelStreaming*, auto handles the assignment.
+				auto NewLevel = UEditorLevelUtils::AddLevelToWorld(World, *PathToCheck, ULevelStreamingKismet::StaticClass());
+
+				// CRITICAL FIX: FORCE RESET to Persistent Level immediately inside the loop.
+				// AddLevelToWorld automatically sets the new level as "Current".
+				// Failing to reset this causes the NEXT AddLevelToWorld call to try adding a sublevel-to-a-sublevel, which crashes on the 2nd attempt.
+				if (World->PersistentLevel)
+				{
+					World->SetCurrentLevel(World->PersistentLevel);
+				}
+
+				// Flush streaming state to ensure memory is stable before next iteration
+				if (NewLevel)
+				{
+					World->FlushLevelStreaming(EFlushLevelStreamingType::Visibility);
+				}
+			}
+		}
+
+		// =========================================================================================
+		// PHASE 2: SPAWN VOLUMES (INSIDE TRANSACTION)
+		// =========================================================================================
+
+		GEditor->BeginTransaction(LOCTEXT("PasteVolumes", "Paste Volumes"));
 		GEditor->SelectNone(true, true);
 
-		ULevel* OriginalCurrentLevel = World->GetCurrentLevel();
-
-		// --- STATE FOR "YES ALL" LOGIC ---
-		EAppReturnType::Type MissingLevelResponse = EAppReturnType::Retry; // Default state
-		TSet<FString> ProcessedMissingLevels;
-
-		// CRASH FIX: Defer level addition to prevent Stack Overflow during paste/loading recursion
-		TSet<FString> LevelsToAddToWorld;
 		TArray<ALevelStreamingVolume*> PastedStreamingVolumes;
 
 		for (TSharedPtr<FJsonValue> Val : JsonArray)
@@ -480,7 +565,7 @@ FReply FVolumeClipboardModule::OnCreateVolumesClicked()
 				FString InternalName = Obj->GetStringField("InternalName");
 
 				// --- 1. DETERMINE TARGET LEVEL ---
-				ULevel* TargetLevel = OriginalCurrentLevel;
+				ULevel* TargetLevel = SavedCurrentLevel; // Default to saved level
 				bool bFoundSpecificLevel = false;
 
 				if (bPasteToOriginalLevel && Obj->HasField("OriginLevel"))
@@ -489,7 +574,6 @@ FReply FVolumeClipboardModule::OnCreateVolumesClicked()
 					FString TargetPackageName = "";
 					if (Obj->HasField("OriginLevelPackage")) TargetPackageName = Obj->GetStringField("OriginLevelPackage");
 
-					// Pass 1: Package
 					if (!TargetPackageName.IsEmpty())
 					{
 						for (ULevel* Level : World->GetLevels())
@@ -502,7 +586,6 @@ FReply FVolumeClipboardModule::OnCreateVolumesClicked()
 							}
 						}
 					}
-					// Pass 2: Short Name
 					if (!bFoundSpecificLevel)
 					{
 						for (ULevel* Level : World->GetLevels())
@@ -580,18 +663,16 @@ FReply FVolumeClipboardModule::OnCreateVolumesClicked()
 					{
 						NewVolume->BrushType = (EBrushType)(int32)Obj->GetNumberField("BrushType");
 					}
-
 					if (Obj->HasField("SpawnMethod"))
 					{
 						NewVolume->SpawnCollisionHandlingMethod = (ESpawnActorCollisionHandlingMethod)(int32)Obj->GetNumberField("SpawnMethod");
 					}
-
 					if (NewVolume->GetRootComponent() && Obj->HasField("Mobility"))
 					{
 						NewVolume->GetRootComponent()->SetMobility((EComponentMobility::Type)(int32)Obj->GetNumberField("Mobility"));
 					}
 
-					// --- GEOMETRY RECONSTRUCTION ---
+					// GEOMETRY
 					NewVolume->Brush = NewObject<UModel>(NewVolume, NAME_None, RF_Transactional);
 					NewVolume->Brush->Initialize(nullptr, true);
 					NewVolume->Brush->Polys = NewObject<UPolys>(NewVolume->Brush, NAME_None, RF_Transactional);
@@ -612,14 +693,8 @@ FReply FVolumeClipboardModule::OnCreateVolumesClicked()
 							FPoly NewPoly;
 							NewPoly.Init();
 
-							if (PolyObj->HasField("Flags"))
-							{
-								NewPoly.PolyFlags = (uint32)PolyObj->GetNumberField("Flags");
-							}
-							else
-							{
-								NewPoly.PolyFlags = PF_NotSolid;
-							}
+							if (PolyObj->HasField("Flags")) NewPoly.PolyFlags = (uint32)PolyObj->GetNumberField("Flags");
+							else NewPoly.PolyFlags = PF_NotSolid;
 
 							const TArray<TSharedPtr<FJsonValue>>* VertArray;
 							if (PolyObj->TryGetArrayField("Verts", VertArray))
@@ -628,7 +703,6 @@ FReply FVolumeClipboardModule::OnCreateVolumesClicked()
 								{
 									TSharedPtr<FJsonObject> VObj = VVal->AsObject();
 									if (!VObj.IsValid()) continue;
-
 									FVector Vertex;
 									Vertex.X = VObj->GetNumberField("X");
 									Vertex.Y = VObj->GetNumberField("Y");
@@ -636,7 +710,6 @@ FReply FVolumeClipboardModule::OnCreateVolumesClicked()
 									NewPoly.Vertices.Add(Vertex);
 								}
 							}
-
 							if (NewPoly.Vertices.Num() >= 3)
 							{
 								NewPoly.Base = NewPoly.Vertices[0];
@@ -664,7 +737,6 @@ FReply FVolumeClipboardModule::OnCreateVolumesClicked()
 							TSharedPtr<FJsonObject> CompData = CompVal->AsObject();
 							FString CompClass = CompData->GetStringField("ClassName");
 							const TSharedPtr<FJsonObject>* CompProps;
-
 							if (CompData->TryGetObjectField("Props", CompProps))
 							{
 								for (UActorComponent* ExistingComp : NewVolume->GetComponents())
@@ -678,96 +750,13 @@ FReply FVolumeClipboardModule::OnCreateVolumesClicked()
 						}
 					}
 
-					// --- RE-LINK LEVEL STREAMING VOLUMES (PASS 1: LINK EXISTING & COLLECT MISSING) ---
+					// Store for Link Phase
 					if (ALevelStreamingVolume* StreamingVol = Cast<ALevelStreamingVolume>(NewVolume))
 					{
-						// Track all pasted streaming volumes for re-linking in Pass 3
 						PastedStreamingVolumes.Add(StreamingVol);
-
-						const TSharedPtr<FJsonObject>* PropsPtr;
-						if (Obj->TryGetObjectField("Properties", PropsPtr))
-						{
-							if ((*PropsPtr)->HasField("StreamingLevelNames"))
-							{
-								FString RawNames = (*PropsPtr)->GetStringField("StreamingLevelNames");
-								RawNames = RawNames.Replace(TEXT("("), TEXT("")).Replace(TEXT(")"), TEXT("")).Replace(TEXT("\""), TEXT("")).Replace(TEXT("\'"), TEXT(""));
-
-								TArray<FString> Targets;
-								RawNames.ParseIntoArray(Targets, TEXT(","), true);
-
-								for (FString& Path : Targets)
-								{
-									Path = Path.TrimStartAndEnd();
-									FString TargetShort = FPackageName::GetShortName(Path);
-									bool bFoundLevel = false;
-
-									// 1. Check if level is already open
-									for (ULevelStreaming* StreamingLevel : World->GetStreamingLevels())
-									{
-										if (StreamingLevel)
-										{
-											FString StreamPkg = StreamingLevel->GetWorldAssetPackageName();
-											FString StreamShort = FPackageName::GetShortName(StreamPkg);
-
-											if (StreamPkg == Path || StreamShort == TargetShort)
-											{
-												StreamingLevel->Modify();
-												StreamingLevel->EditorStreamingVolumes.AddUnique(StreamingVol); // Link to existing
-												bFoundLevel = true;
-												break;
-											}
-										}
-									}
-
-									// 2. If MISSING, Prompt User and COLLECT the level path (Defer AddLevelToWorld)
-									if (!bFoundLevel)
-									{
-										// Check if we already processed this level in this loop to avoid redundant prompts
-										if (ProcessedMissingLevels.Contains(Path))
-										{
-											continue;
-										}
-
-										// Mark as processed so we don't ask again
-										ProcessedMissingLevels.Add(Path);
-
-										bool bShouldAdd = false;
-
-										if (MissingLevelResponse == EAppReturnType::YesAll)
-										{
-											bShouldAdd = true;
-										}
-										else if (MissingLevelResponse == EAppReturnType::NoAll)
-										{
-											bShouldAdd = false;
-										}
-										else
-										{
-											// Show Dialog
-											FText Message = FText::Format(LOCTEXT("MissingLevelPrompt", "The Level '{0}' referenced by this volume is not in the current world.\n\nDo you want to add it as a Sub-Level now?"), FText::FromString(TargetShort));
-											MissingLevelResponse = FMessageDialog::Open(EAppMsgType::YesNoYesAllNoAll, Message);
-
-											if (MissingLevelResponse == EAppReturnType::Yes || MissingLevelResponse == EAppReturnType::YesAll)
-											{
-												bShouldAdd = true;
-											}
-										}
-
-										if (bShouldAdd)
-										{
-											// DEFER THE LEVEL ADDITION (Pass 2) - DO NOT CALL UEditorLevelUtils::AddLevelToWorld HERE
-											LevelsToAddToWorld.Add(Path);
-										}
-									}
-								}
-							}
-						}
 					}
-					// -------------------------------------
 
-					// PostEditChange triggers engine updates, which is the desired mechanism to update component registration, geometry, etc.
 					NewVolume->PostEditChange();
-
 					FTransform FinalTransform;
 					FinalTransform.SetLocation(Location);
 					FinalTransform.SetRotation(Quat);
@@ -788,34 +777,20 @@ FReply FVolumeClipboardModule::OnCreateVolumesClicked()
 			}
 		}
 
-		if (OriginalCurrentLevel)
+		if (SavedCurrentLevel)
 		{
-			World->SetCurrentLevel(OriginalCurrentLevel);
+			World->SetCurrentLevel(SavedCurrentLevel);
 		}
 
-		// PASS 1 END - End the volume paste transaction
-		GEditor->EndTransaction();
+		// =========================================================================================
+		// PHASE 3: RELINK VOLUMES (INSIDE TRANSACTION)
+		// =========================================================================================
 
-		// FIX: Corrected method to redraw editor viewports to ensure visual update and state flush
-		GEditor->RedrawAllViewports(true);
-
-		// NEW PASS 2: DEFERRED LEVEL ADDITION
-		// CRITICAL FIX: DO NOT wrap AddLevelToWorld in a Transaction. 
-		// It handles its own undo history and wrapping it causes a crash (Access Violation -1).
-		for (const FString& PathToAdd : LevelsToAddToWorld)
-		{
-			// Note: ULevelStreamingDynamic is okay, but standard sublevels usually use ULevelStreaming::StaticClass()
-			UEditorLevelUtils::AddLevelToWorld(World, *PathToAdd, ULevelStreamingDynamic::StaticClass());
-		}
-
-		// NEW PASS 3: RE-LINKING NEWLY ADDED LEVELS TO PASTED VOLUMES
-		GEditor->BeginTransaction(LOCTEXT("RelinkVolumes", "Relink Streaming Volumes"));
 		for (ALevelStreamingVolume* StreamingVol : PastedStreamingVolumes)
 		{
-			// Safety Check: Verify the actor is still valid (Level Load might have triggered GC)
 			if (!StreamingVol || !IsValid(StreamingVol)) continue;
 
-			// StreamingLevelNames was restored in Pass 1, giving us the target levels.
+			// We already loaded all missing levels in Phase 1, so they are guaranteed to exist now.
 			TArray<FName> RequiredLevelNames = StreamingVol->StreamingLevelNames;
 
 			for (const FName& RequiredName : RequiredLevelNames)
@@ -830,7 +805,6 @@ FReply FVolumeClipboardModule::OnCreateVolumesClicked()
 						FString StreamPkg = StreamingLevel->GetWorldAssetPackageName();
 						FString StreamShort = FPackageName::GetShortName(StreamPkg);
 
-						// Link if the level was just added or is an existing level that was missed (safe to re-add unique)
 						if (StreamPkg == RequiredPath || StreamShort == TargetShort)
 						{
 							StreamingLevel->Modify();
@@ -840,9 +814,10 @@ FReply FVolumeClipboardModule::OnCreateVolumesClicked()
 				}
 			}
 		}
-		GEditor->EndTransaction();
 
+		GEditor->EndTransaction();
 		GEditor->RebuildAlteredBSP();
+		GEditor->RedrawAllViewports(true);
 	}
 
 	return FReply::Handled();
