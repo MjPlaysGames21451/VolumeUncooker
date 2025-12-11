@@ -1419,6 +1419,5 @@ F:\UE_4.27\Engine\Source\Runtime\ApplicationCore\Public\HAL/PlatformApplicationM
 F:\UE_4.27\Engine\Source\Runtime\ApplicationCore\Public\Windows/WindowsPlatformApplicationMisc.h
 F:\UE_4.27\Engine\Source\Runtime\ApplicationCore\Public\GenericPlatform/GenericPlatformApplicationMisc.h
 F:\UE_4.27\Engine\Source\Editor\UnrealEd\Public\BSPOps.h
-F:\UE_4.27\Engine\Source\Runtime\Engine\Classes\Engine/LevelStreamingKismet.h
 F:\UE_4.27\Engine\Source\Editor\UnrealEd\Public\EditorLevelUtils.h
 F:\UE_4.27\Engine\Intermediate\Build\Win64\UE4Editor\Inc\UnrealEd\EditorLevelUtils.generated.h
