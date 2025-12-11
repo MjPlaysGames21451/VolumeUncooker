@@ -38,7 +38,7 @@
 #include "Engine/Level.h" 
 #include "EngineUtils.h"                  
 #include "Engine/LevelStreaming.h"
-#include "Engine/LevelStreamingKismet.h" 
+#include "Engine/LevelStreamingDynamic.h" 
 #include "Engine/LevelStreamingVolume.h"  
 #include "EditorLevelUtils.h"             
 #include "Misc/MessageDialog.h"           
@@ -525,7 +525,7 @@ FReply FVolumeClipboardModule::OnCreateVolumesClicked()
 				// LOAD LEVEL
 				// FIX: Use 'auto' to handle the return type safely.
 				// In UE4.27 this returns ULevel*, but if your build expects ULevelStreaming*, auto handles the assignment.
-				auto NewLevel = UEditorLevelUtils::AddLevelToWorld(World, *PathToCheck, ULevelStreamingKismet::StaticClass());
+				auto NewLevel = UEditorLevelUtils::AddLevelToWorld(World, *PathToCheck, ULevelStreamingDynamic::StaticClass());
 
 				// CRITICAL FIX: FORCE RESET to Persistent Level immediately inside the loop.
 				// AddLevelToWorld automatically sets the new level as "Current".
